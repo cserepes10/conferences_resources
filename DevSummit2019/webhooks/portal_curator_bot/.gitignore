@@ -1,0 +1,6 @@
+arcgis/
+autocorrect/
+secrets.json
+__pycache__
+.DS_Store
+Archive.zip
