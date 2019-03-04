@@ -1,3 +1,4 @@
+from enum import Enum
 import json
 SECRETS = json.load(open("./secrets.json", "r"))
 
@@ -5,112 +6,180 @@ from arcgis.gis import GIS
 from arcgis.mapping import WebMap
 
 from email_util import send_email_smtp
-#from spell_check_util import spell_check
 
 def handler(lambda_event, lambda_context):
+    """The top level function called when AWS lambda is evoked"""
     gis = get_gis_from_lambda_event(lambda_event)
-    for event in lambda_event['events']:
-        message = try_event_as_item_add(event, gis)
-    return {"status" : 200, "message" : message }
+    for event_json in lambda_event['events']:
+        event_handler = ArcGISEnterpriseWebhookEventHandler(event_json, gis)
+        event_handler.handle_event()
+    return {"status" : 200 }
 
 def get_gis_from_lambda_event(lambda_event):
     """Connects to the portal from the lambda event with the specified
     portal admin username and the password from the `./secrets.json` file
     """
-    print("This is the event:")
-    print(lambda_event)
     portal_url = lambda_event["info"]["portalURL"]
-    portal_admin_username = "portaladmin"
+    portal_admin_username = "portaladmin" # Replace with your credentials!
     portal_admin_password = SECRETS["portal_admin_password"]
     gis = GIS(portal_url, portal_admin_username, portal_admin_password,
               verify_cert=False)
+
+    # Print debug info
+    print("This is the lambda event:")
+    print(lambda_event)
     print("This is our GIS:")
     print(gis)
+
     return gis
 
-def try_event_as_item_add(event, gis):
-    if ('operation' in event) and \
-       ('source' in event) and \
-       (event['source'] == 'item'):
-        item = gis.content.get(event['id'])
-        item_owner = gis.users.get(item.owner)
-        if item.type.lower() == "web map":
-            report_msg = ""
-            for layer_item in get_webmap_layer_items(item, gis):
-                thumbnail_url = \
-                    try_update_empty_thumbnail(item, layer_item)
-                if thumbnail_url:
-                    report_msg += f'Thumbnail updated to <img src='\
-                                  f'"{thumbnail_url}"><hr>'
-                new_tags = \
-                    try_update_lacking_tags(item, layer_item)
-                if new_tags:
-                    report_msg += 'Tags updated to '\
-                                  '{}.<hr>'.format(', '.join(new_tags))
-                report_msg += get_metadata_report(item)
-            if report_msg:
-                report_msg = f"<h3>Hello {item_owner.username},</h3>" + \
-                             f"<br><br>" + \
-                             f"I have noticed some issues with your item " + \
-                             f"at {item.homepage}. Please see the rest " + \
-                             f"of this email for information.<br><hr><br>" + \
-                             f"{report_msg}"
-                recepients = [item_owner.email,]
-                send_email_smtp(recepients, report_msg)
-    return "Success!"
+class ArcGISEnterpriseWebhookEvents(Enum):
+    UNKNOWN = 0
+    ALL_ITEMS = 1 # Webhook event `/items`
+    ALL_GROUPS = 2 # Webhook event `/groups`
+    ALL_USERS = 3 # Webhook event `/users`
+    # Define other Enums here for other webhook events!
 
-def try_update_empty_thumbnail(item_to_update, item_to_take_thumbnail_from):
-    """check `item_to_update` for a thumbnail. If there is none, take from
-    the 2nd pos argument (`item_to_take_thumbnail_from`)
+class ArcGISEnterpriseWebhookEventHandler:
+    """The class to parse through the webhook json
+    payload from the webhook, infer the type of Enterprise
+    webhook event, and act accordingly
     """
-    if (not item_to_update.thumbnail) and \
-       (item_to_take_thumbnail_from.thumbnail):
-        path = item_to_take_thumbnail_from.download_thumbnail("/tmp/")
-        item_to_update.update(thumbnail=path)
-        return item_to_take_thumbnail_from.get_thumbnail_link()
-    return False
+    event = ArcGISEnterpriseWebhookEvents.UNKNOWN
+    def __init__(self, event_json, gis):
+        """Instantiate with the webhook `event_json` dict, and the
+        already instantiated GIS inst of our portal
+        """
+        self._event_json = event_json
+        self._gis = gis
+        self._email_msg = ""
+        self._infer_event()
 
-def try_update_lacking_tags(item_to_update, item_to_take_tags_from):
-    """check `item_to_update` for tags. If there are <5 tags, supplement that
-    item with tags from `item_to_take_tags_from`
-    """
-    MIN_NUM_TAGS = 5
-    num_tags = len(item_to_update.tags)
-    if(num_tags < MIN_NUM_TAGS):
-        num_new_tags_to_fill = MIN_NUM_TAGS - num_tags
-        potential_new_tags = [tag for tag in item_to_take_tags_from.tags \
-                              if tag not in item_to_update.tags]
-        new_tags = potential_new_tags[:num_new_tags_to_fill]
-        all_tags_to_update_with = item_to_update.tags + new_tags
-        item_to_update.update({'tags' : all_tags_to_update_with})
-        return all_tags_to_update_with
-    return False
+    def _infer_event(self):
+        # Test if webhook event is `/items`
+        if ('operation' in self._event_json) and \
+           ('source' in self._event_json) and \
+           (self._event_json['source'] == 'item'):
+               self.event = ArcGISEnterpriseWebhookEvents.ALL_ITEMS
 
-def get_webmap_layer_items(webmap_item, gis):
-    output = []
-    for layer in WebMap(webmap_item).layers:
-        if('itemId' in layer):
-            output.append(gis.content.get(layer['itemId']))
-    return output
+        # Test if webhook event is `/groups`
+        if ('operation' in self._event_json) and \
+           ('source' in self._event_json) and \
+           (self._event_json['source'] == 'group'):
+               self.event = ArcGISEnterpriseWebhookEvents.ALL_GROUPS
 
-def get_metadata_report(item):
-    output = ""
-    MIN_NUM_CHARS = 50
+        # Test if webhook event is `/users`
+        if ('operation' in self._event_json) and \
+           ('source' in self._event_json) and \
+           (self._event_json['source'] == 'user'):
+                self.event = ArcGISEnterpriseWebhookEvents.ALL_USERS
 
-    if not item.title:
-        output += "There is no title for this item.<hr>"
+    def handle_event(self):
+        """Call this function to actually call the code that you've
+        written for the type of webhook event. Add more functions
+        and enum entries for different type of webhooks 
+        """
+        if self.event == ArcGISEnterpriseWebhookEvents.ALL_ITEMS:
+            return self._try_event_as_all_item()
+        elif self.event == ArcGISEnterpriseWebhookEvents.ALL_GROUPS:
+            return self._try_event_as_all_group()
+        elif self.event == ArcGISEntepriseWebhookEvents.ALL_USERS:
+            return self._try_event_as_all_user()
 
-    if not item.description:
-        output += "There is no description for this item.<hr>"
-    elif len(item.description) < MIN_NUM_CHARS:
-        output += f"Your description is {len(item.description)} " + \
-                  f"characters long. Consider making it longer.<hr>"
+    def _try_event_as_all_item(self):
+        """In this example, we have only implemented item update webhook
+        behavior. Furthermore, only items of type `Web Map` will work.
 
-    if not item.snippet:
-        output += "There is no snippet for this item.<hr>"
-    elif len(item.snippet) < MIN_NUM_CHARS:
-        output += f"Your snippet is {len(item.snippet)} " + \
-                  f"characters long. Consider making it longer.<hr>"
- 
+        Will check the item that triggered the webhook's metadata, and will
+        attempt to "fill in" the missing metadata with operational layer
+        information. Will then send out an email of changes made.
+        """
+        item = self._gis.content.get(self._event_json['id'])
+        item_owner = self._gis.users.get(item.owner)
+        if item.type.lower() != "web map":
+            self.report_message = "Item type must be a Web Map. Failing."
+            return False
+        else:
+            new_thumbnail_path = []
+            new_tags = []
+            for layer_item in self._get_webmap_layer_items(item):
+                if (not item.thumbnail) and \
+                   (layer_item.thumbnail) and \
+                   (not new_thumbnail_path):
+                    # If no item.thumbnail, download the first layer thumbnail
+                    new_thumbnail_path = layer_item.download_thumbnail("/tmp/")
 
-    return output
+                num_tags = len(item.tags)
+                min_num_tags = 5
+                if num_tags < min_num_tags and len(new_tags) < min_num_tags:
+                    # If not enough tags, fill in missing tags
+                    num_new_tags_to_fill = MIN_NUM_TAGS - (num_tags + len(new_tags))
+                    potential_new_tags = \
+                        [tag for tag in layer_item.tags \
+                         if tag not in item.tags]
+                    new_tags.append(potential_new_tags[:num_new_tags_to_fill])
+            
+            # If a new thumbnail or new tags are staged for update, call 
+            # `item.update()` and send out our email
+            update_kwargs = {}
+            update_args = []
+            if new_thumbnail_path:
+                update_kwargs["thumbnail"] = new_thumbnail_path
+            if new_tags:
+                update_args.append({"tags": new_tags})
+            if update_kwargs or update_args:
+                item.update(*update_args, **update_kwargs)
+                self._send_email_report(new_thumbnail_path, new_tags, item)
+
+    def _get_webmap_layer_items(self, webmap_item):
+        output = []
+        for layer in WebMap(webmap_item).layers:
+            if('itemId' in layer):
+                output.append(self._gis.content.get(layer['itemId']))
+        return output
+
+    def _send_email_report(self, new_thumbnail_path, new_tags, item):
+        """Sends an email report of item updates and item information"""
+        report = f"Hello {item.owner.username},<br>"\
+                 f"I have noticed some issues with "\
+                 f'<a href="{item.homepage}">your item</a>. '\
+                 f"Please see the remainder of this email for more info.<br>"\
+                 f"<h1>Item Metadata Report</h1>"
+        html_list_parts = ""
+        if new_thumbnail_path:
+            html_list_parts += \
+                f"<li>Thumbnail updated to {new_thumbnail_path}</li>"
+        if new_tags:
+            html_list_pars += \
+                "<li> Tags updated to {}".format(", ".join(new_tags))
+        html_list_parts += self._get_metadata_report(item)
+        report += f"<ul>{html_list_parts}</ul>"
+        response = send_email_smtp([item.owner.email], report)
+        print(f"Sending email to {item.owner.email} status: {response}")
+
+    def _get_metadata_report(item):
+        """Returns <li> list items of if the snippet/description/title
+        is not up to standard"""
+        output = ""
+        MIN_NUM_CHARS = 50
+
+        if not item.title:
+            output += "<li>There is no title for this item.</li>\n"
+
+        if not item.description:
+            output += "<li>There is no description for this item.</li>\n"
+        elif len(item.description) < MIN_NUM_CHARS:
+            output += f"<li>Your description is {len(item.description)} " + \
+                      f"characters long. Consider making it longer.</li>\n"
+
+        if not item.snippet:
+            output += "<li>There is no snippet for this item.</li>\n"
+        elif len(item.snippet) < MIN_NUM_CHARS:
+            output += f"<li>Your snippet is {len(item.snippet)} " + \
+                      f"characters long. Consider making it longer.</li>\n"
+
+    def _try_event_as_all_group(self):
+        raise Exception("All group webhook handler not implemented!")
+
+    def _try_event_as_all_user(self):
+        raise Exception("All user webhook handler not implemented!")
