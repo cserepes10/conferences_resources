@@ -14,8 +14,8 @@ limitations under the License.
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-import json
-SECRETS = json.load(open("./secrets.json", "r"))
+
+from config import *
 
 def send_email_smtp(recipients, message,
                     subject="Message from CuratorBot!"):
@@ -24,11 +24,11 @@ def send_email_smtp(recipients, message,
     """
     try:
         # Set up server and credential variables
-        smtp_server_url = "smtp.gmail.com"
-        smtp_server_port = 587
-        sender = "arcgispyapibot@gmail.com"
-        username = sender
-        password = SECRETS["smtp_email_password"]
+        smtp_server_url = SMTP_SERVER_URL
+        smtp_server_port = SMTP_SERVER_PORT
+        sender = SMTP_SENDER
+        username = SMTP_USERNAME
+        password = SMTP_PASSWORD
 
         # Instantiate our server, configure the necessary security
         server = smtplib.SMTP(smtp_server_url, smtp_server_port)
