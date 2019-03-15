@@ -25,3 +25,6 @@ hs_err_pid*
 target/
 .idea/
 *.iml
+
+# Ignore the Microsoft Flow zip package needed
+!webhooks/microsoft_flow_template/*.zip
